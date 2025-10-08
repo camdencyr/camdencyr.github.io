@@ -1,0 +1,945 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Spooky Graveyard at Night</title>
+  <style>
+    body { 
+      margin: 0; 
+      overflow: hidden; 
+      background: #000;
+    }
+    canvas { 
+      display: block; 
+      width: 100%; 
+      height: 100vh;
+    }
+    #info {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      color: white;
+      font-family: Arial, sans-serif;
+      font-size: 14px;
+      background: rgba(0,0,0,0.7);
+      padding: 10px;
+      border-radius: 5px;
+    }
+    #gameStats {
+      position: absolute;
+      top: 60px;
+      left: 10px;
+      color: white;
+      font-family: Arial, sans-serif;
+      font-size: 16px;
+      background: rgba(0,0,0,0.7);
+      padding: 15px;
+      border-radius: 5px;
+      min-width: 200px;
+    }
+    #gameStats div {
+      margin: 5px 0;
+    }
+    .stat-label {
+      color: #ffaa00;
+      font-weight: bold;
+    }
+    #jumpScare {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.9);
+      display: none;
+      justify-content: center;
+      align-items: center;
+      font-size: 120px;
+      color: white;
+      z-index: 1000;
+      animation: shake 0.5s;
+    }
+    @keyframes shake {
+      0%, 100% { transform: translate(0, 0); }
+      10%, 30%, 50%, 70%, 90% { transform: translate(-10px, 0); }
+      20%, 40%, 60%, 80% { transform: translate(10px, 0); }
+    }
+  </style>
+</head>
+<body>
+  <div id="info">
+    WASD: Move | Mouse: Look | Arrows: Turn<br>
+    F: Flashlight | Collect skulls! | Find safe zones!
+  </div>
+  <div id="gameStats">
+    <div><span class="stat-label">💀 Skulls:</span> <span id="skullCount">0</span>/15</div>
+    <div><span class="stat-label">🔦 Flashlight:</span> <span id="flashlightStatus">OFF</span></div>
+    <div><span class="stat-label">🏃 Speed:</span> <span id="speedStatus">Normal</span></div>
+    <div><span class="stat-label">🕯️ Safe Zone:</span> <span id="safeZoneStatus">No</span></div>
+  </div>
+  <div id="jumpScare">👻 BOO!</div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    let scene, camera, renderer;
+    let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+    let turnLeft = false, turnRight = false;
+    let velocity = new THREE.Vector3();
+    let direction = new THREE.Vector3();
+    let yaw = 0, pitch = 0;
+    let audioContext;
+    
+    // Game state
+    let skullsCollected = 0;
+    let totalSkulls = 15;
+    let flashlightOn = false;
+    let flashlight;
+    let inSafeZone = false;
+    let isChased = false;
+    let baseSpeed = 0.1;
+    let currentSpeed = baseSpeed;
+    let lastJumpScare = 0;
+    let collectibles = [];
+    let safeZones = [];
+    let jumpScareGhosts = [];
+    
+    
+    function playScreamSound() {
+      if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      
+      const screamOsc = audioContext.createOscillator();
+      const screamGain = audioContext.createGain();
+      
+      screamOsc.type = 'sawtooth';
+      screamOsc.frequency.setValueAtTime(800, audioContext.currentTime);
+      screamOsc.frequency.exponentialRampToValueAtTime(200, audioContext.currentTime + 0.5);
+      
+      screamGain.gain.setValueAtTime(0.3, audioContext.currentTime);
+      screamGain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+      
+      screamOsc.connect(screamGain);
+      screamGain.connect(audioContext.destination);
+      
+      screamOsc.start();
+      screamOsc.stop(audioContext.currentTime + 0.5);
+    }
+    
+    function triggerJumpScare() {
+      const now = Date.now();
+      if (now - lastJumpScare < 15000) return; // Cooldown
+      
+      lastJumpScare = now;
+      playScreamSound();
+      
+      const jumpScareDiv = document.getElementById('jumpScare');
+      jumpScareDiv.style.display = 'flex';
+      
+      setTimeout(() => {
+        jumpScareDiv.style.display = 'none';
+      }, 500);
+      
+      isChased = true;
+      currentSpeed = baseSpeed * 2;
+      document.getElementById('speedStatus').textContent = 'BOOSTED! 🏃💨';
+      
+      setTimeout(() => {
+        isChased = false;
+        currentSpeed = baseSpeed;
+        document.getElementById('speedStatus').textContent = 'Normal';
+      }, 8000);
+    }
+    
+    function updateGameStats() {
+      document.getElementById('skullCount').textContent = skullsCollected;
+      document.getElementById('flashlightStatus').textContent = flashlightOn ? 'ON' : 'OFF';
+      document.getElementById('safeZoneStatus').textContent = inSafeZone ? 'YES ✓' : 'No';
+    }
+    
+    function init() {
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0a0a15);
+      scene.fog = new THREE.Fog(0x0a0a15, 10, 80);
+      
+      camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.set(0, 1.6, 0);
+      
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+      
+      // Lighting
+      const ambientLight = new THREE.AmbientLight(0x1a1a2e, 0.5);
+      scene.add(ambientLight);
+      
+      const moonLight = new THREE.DirectionalLight(0x9999cc, 0.4);
+      moonLight.position.set(15, 12, -30);
+      scene.add(moonLight);
+      
+      // Flashlight
+      flashlight = new THREE.SpotLight(0xffffaa, 0, 20, Math.PI / 6, 0.5, 2);
+      flashlight.position.copy(camera.position);
+      flashlight.target.position.set(0, 0, -1);
+      scene.add(flashlight);
+      scene.add(flashlight.target);
+      
+      // Ground
+      const groundGeometry = new THREE.PlaneGeometry(200, 200);
+      const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x1a1410, roughness: 1 });
+      const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+      ground.rotation.x = -Math.PI / 2;
+      scene.add(ground);
+      
+      // Moon
+      const moonGeometry = new THREE.SphereGeometry(2, 32, 32);
+      const moonMaterial = new THREE.MeshBasicMaterial({ color: 0xffcc66 });
+      const moon = new THREE.Mesh(moonGeometry, moonMaterial);
+      moon.position.set(15, 12, -30);
+      scene.add(moon);
+      
+      // Stars
+      const starPositions = [
+        [5, 15, -20], [-8, 18, -15], [12, 20, -25], [-15, 16, -18],
+        [18, 22, -30], [-20, 19, -22], [10, 17, -28], [-5, 21, -35],
+        [22, 23, -20], [-18, 20, -32], [3, 19, -24], [-12, 24, -28]
+      ];
+      
+      starPositions.forEach(pos => {
+        const starGeometry = new THREE.SphereGeometry(0.05, 8, 8);
+        const starMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+        const star = new THREE.Mesh(starGeometry, starMaterial);
+        star.position.set(pos[0], pos[1], pos[2]);
+        scene.add(star);
+      });
+      
+      createGravestones();
+      createDeadTrees();
+      createCrosses();
+      createMausoleums();
+      createGhosts();
+      createPumpkins();
+      createBats();
+      createCollectibles();
+      createSafeZones();
+      createJumpScareGhosts();
+      
+      // Lightning effect
+      setInterval(() => {
+        if (Math.random() < 0.1) {
+          triggerLightning();
+        }
+      }, 5000);
+      
+      // Controls
+      document.addEventListener('keydown', onKeyDown);
+      document.addEventListener('keyup', onKeyUp);
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('click', () => {
+        document.body.requestPointerLock();
+      });
+      
+      window.addEventListener('resize', onWindowResize);
+    }
+    
+    function triggerLightning() {
+      const originalColor = scene.background.clone();
+      const originalIntensity = scene.children.find(c => c.type === 'AmbientLight').intensity;
+      
+      scene.background.setHex(0xffffff);
+      scene.children.find(c => c.type === 'AmbientLight').intensity = 2;
+      
+      setTimeout(() => {
+        scene.background.copy(originalColor);
+        scene.children.find(c => c.type === 'AmbientLight').intensity = originalIntensity;
+      }, 100);
+      
+      setTimeout(() => {
+        scene.background.setHex(0xffffff);
+        scene.children.find(c => c.type === 'AmbientLight').intensity = 2;
+        
+        setTimeout(() => {
+          scene.background.copy(originalColor);
+          scene.children.find(c => c.type === 'AmbientLight').intensity = originalIntensity;
+        }, 50);
+      }, 200);
+    }
+    
+    function createCollectibles() {
+      const skullPositions = [
+        [-4, -6], [5, -9], [-9, -13], [8, -16], [-13, -19],
+        [11, -22], [-16, -26], [14, -29], [-7, -33], [6, -35],
+        [-18, -38], [17, -40], [-10, -44], [12, -46], [-2, -48]
+      ];
+      
+      skullPositions.forEach(pos => {
+        const skullGroup = new THREE.Group();
+        
+        // Skull
+        const skullGeometry = new THREE.SphereGeometry(0.2, 8, 8);
+        const skullMaterial = new THREE.MeshBasicMaterial({ 
+          color: 0xffaa00,
+          transparent: true,
+          opacity: 0.9
+        });
+        const skull = new THREE.Mesh(skullGeometry, skullMaterial);
+        skull.scale.set(1, 1.2, 1);
+        skullGroup.add(skull);
+        
+        // Glow
+        const glowGeometry = new THREE.SphereGeometry(0.3, 8, 8);
+        const glowMaterial = new THREE.MeshBasicMaterial({
+          color: 0xffaa00,
+          transparent: true,
+          opacity: 0.3
+        });
+        const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+        skullGroup.add(glow);
+        
+        skullGroup.position.set(pos[0], 0.5, pos[1]);
+        skullGroup.userData = { type: 'collectible', collected: false };
+        collectibles.push(skullGroup);
+        scene.add(skullGroup);
+        
+        const light = new THREE.PointLight(0xffaa00, 0.5, 3);
+        skullGroup.add(light);
+      });
+    }
+    
+    function createSafeZones() {
+      const lanternPositions = [
+        [-15, -10], [15, -15], [-12, -25], [13, -30], [0, -40]
+      ];
+      
+      lanternPositions.forEach(pos => {
+        const lanternGroup = new THREE.Group();
+        
+        // Post
+        const postGeometry = new THREE.CylinderGeometry(0.05, 0.05, 2, 8);
+        const postMaterial = new THREE.MeshStandardMaterial({ color: 0x2a2a2a });
+        const post = new THREE.Mesh(postGeometry, postMaterial);
+        post.position.y = 1;
+        lanternGroup.add(post);
+        
+        // Lantern
+        const lanternGeometry = new THREE.BoxGeometry(0.3, 0.4, 0.3);
+        const lanternMaterial = new THREE.MeshStandardMaterial({ color: 0x4a3a2a });
+        const lantern = new THREE.Mesh(lanternGeometry, lanternMaterial);
+        lantern.position.y = 2.2;
+        lanternGroup.add(lantern);
+        
+        // Light glow
+        const glowGeometry = new THREE.SphereGeometry(0.2, 8, 8);
+        const glowMaterial = new THREE.MeshBasicMaterial({
+          color: 0xffaa00,
+          transparent: true,
+          opacity: 0.8
+        });
+        const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+        glow.position.y = 2.2;
+        lanternGroup.add(glow);
+        
+        lanternGroup.position.set(pos[0], 0, pos[1]);
+        lanternGroup.userData = { type: 'safeZone', radius: 4 };
+        safeZones.push(lanternGroup);
+        scene.add(lanternGroup);
+        
+        const light = new THREE.PointLight(0xffaa00, 1, 8);
+        light.position.y = 2.2;
+        lanternGroup.add(light);
+      });
+    }
+    
+    function createJumpScareGhosts() {
+      const positions = [
+        [-6, -14], [7, -18], [-11, -28], [10, -32], [-8, -42]
+      ];
+      
+      positions.forEach(pos => {
+        const ghostGroup = new THREE.Group();
+        
+        const bodyGeometry = new THREE.SphereGeometry(0.6, 16, 16);
+        bodyGeometry.scale(1, 1.5, 1);
+        const bodyMaterial = new THREE.MeshBasicMaterial({ 
+          color: 0xeeeeee,
+          transparent: true,
+          opacity: 0
+        });
+        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+        body.position.y = 0.3;
+        ghostGroup.add(body);
+        
+        const tailGeometry = new THREE.ConeGeometry(0.5, 1, 8);
+        const tailMaterial = new THREE.MeshBasicMaterial({ 
+          color: 0xeeeeee,
+          transparent: true,
+          opacity: 0
+        });
+        const tail = new THREE.Mesh(tailGeometry, tailMaterial);
+        tail.position.y = -0.5;
+        tail.rotation.x = Math.PI;
+        ghostGroup.add(tail);
+        
+        ghostGroup.position.set(pos[0], 2, pos[1]);
+        ghostGroup.userData = { 
+          type: 'jumpScareGhost',
+          triggered: false,
+          triggerDistance: 5
+        };
+        jumpScareGhosts.push(ghostGroup);
+        scene.add(ghostGroup);
+      });
+    }
+    
+    function createGravestones() {
+      const gravestonePositions = [
+        [-5, -8], [-3, -8], [-1, -8], [1, -8], [3, -8], [5, -8],
+        [-6, -11], [-4, -11], [-2, -11], [0, -11], [2, -11], [4, -11], [6, -11],
+        [-5, -14], [-3, -14], [-1, -14], [1, -14], [3, -14], [5, -14],
+        [-7, -17], [-5, -17], [-3, -17], [-1, -17], [1, -17], [3, -17], [5, -17], [7, -17],
+        [-6, -20], [-4, -20], [-2, -20], [0, -20], [2, -20], [4, -20], [6, -20],
+        [-8, -23], [-6, -23], [-4, -23], [-2, -23], [0, -23], [2, -23], [4, -23], [6, -23], [8, -23],
+        [-7, -26], [-5, -26], [-3, -26], [-1, -26], [1, -26], [3, -26], [5, -26], [7, -26],
+        [-9, -30], [-7, -30], [-5, -30], [-3, -30], [-1, -30], [1, -30], [3, -30], [5, -30], [7, -30], [9, -30],
+        [-8, -34], [-6, -34], [-4, -34], [-2, -34], [0, -34], [2, -34], [4, -34], [6, -34], [8, -34]
+      ];
+      
+      gravestonePositions.forEach((pos, i) => {
+        const type = i % 3;
+        
+        if (type === 0) {
+          const stoneGroup = new THREE.Group();
+          const stoneGeometry = new THREE.BoxGeometry(0.8, 1.2, 0.15);
+          const stoneMaterial = new THREE.MeshStandardMaterial({ color: 0xb0b0b0 });
+          const stone = new THREE.Mesh(stoneGeometry, stoneMaterial);
+          stone.position.y = 0.6;
+          stoneGroup.add(stone);
+          
+          stoneGroup.position.set(pos[0], 0, pos[1]);
+          stoneGroup.rotation.y = (Math.random() - 0.5) * 0.3;
+          scene.add(stoneGroup);
+        } else if (type === 1) {
+          const stoneGroup = new THREE.Group();
+          const baseGeometry = new THREE.BoxGeometry(0.7, 1, 0.15);
+          const baseMaterial = new THREE.MeshStandardMaterial({ color: 0xc0c0c0 });
+          const base = new THREE.Mesh(baseGeometry, baseMaterial);
+          base.position.y = 0.5;
+          stoneGroup.add(base);
+          
+          const topGeometry = new THREE.CylinderGeometry(0.35, 0.35, 0.15, 16);
+          topGeometry.rotateX(Math.PI / 2);
+          const top = new THREE.Mesh(topGeometry, baseMaterial);
+          top.position.y = 1;
+          stoneGroup.add(top);
+          
+          stoneGroup.position.set(pos[0], 0, pos[1]);
+          stoneGroup.rotation.y = (Math.random() - 0.5) * 0.3;
+          scene.add(stoneGroup);
+        } else {
+          const stoneGroup = new THREE.Group();
+          const stoneGeometry = new THREE.BoxGeometry(0.6, 1.4, 0.12);
+          const stoneMaterial = new THREE.MeshStandardMaterial({ color: 0xa8a8a8 });
+          const stone = new THREE.Mesh(stoneGeometry, stoneMaterial);
+          stone.position.y = 0.7;
+          stoneGroup.add(stone);
+          
+          stoneGroup.position.set(pos[0], 0, pos[1]);
+          stoneGroup.rotation.y = (Math.random() - 0.5) * 0.3;
+          scene.add(stoneGroup);
+        }
+      });
+    }
+    
+    function createDeadTrees() {
+      const treePositions = [
+        [-12, -10], [10, -12], [-15, -20], [13, -22],
+        [-18, -28], [16, -30], [-14, -35], [15, -38],
+        [-20, -15], [18, -18], [-11, -25], [12, -27]
+      ];
+      
+      treePositions.forEach(pos => {
+        const treeGroup = new THREE.Group();
+        
+        const trunkGeometry = new THREE.CylinderGeometry(0.2, 0.3, 4, 8);
+        const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x2a2420 });
+        const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
+        trunk.position.y = 2;
+        treeGroup.add(trunk);
+        
+        for (let i = 0; i < 4; i++) {
+          const branchGeometry = new THREE.CylinderGeometry(0.05, 0.08, 1.5, 6);
+          const branch = new THREE.Mesh(branchGeometry, trunkMaterial);
+          const angle = (i / 4) * Math.PI * 2;
+          const height = 2.5 + Math.random() * 1;
+          branch.position.set(Math.cos(angle) * 0.3, height, Math.sin(angle) * 0.3);
+          branch.rotation.z = Math.PI / 4 + Math.random() * 0.5;
+          branch.rotation.y = angle;
+          treeGroup.add(branch);
+        }
+        
+        treeGroup.position.set(pos[0], 0, pos[1]);
+        scene.add(treeGroup);
+      });
+    }
+    
+    function createCrosses() {
+      const crossPositions = [
+        [-10, -9], [9, -10], [-12, -16], [11, -18],
+        [-13, -24], [12, -26], [-15, -32], [14, -34]
+      ];
+      
+      crossPositions.forEach(pos => {
+        const crossGroup = new THREE.Group();
+        
+        const verticalGeometry = new THREE.BoxGeometry(0.15, 1.5, 0.15);
+        const crossMaterial = new THREE.MeshStandardMaterial({ color: 0xb0b0b0 });
+        const vertical = new THREE.Mesh(verticalGeometry, crossMaterial);
+        vertical.position.y = 0.75;
+        crossGroup.add(vertical);
+        
+        const horizontalGeometry = new THREE.BoxGeometry(0.9, 0.15, 0.15);
+        const horizontal = new THREE.Mesh(horizontalGeometry, crossMaterial);
+        horizontal.position.y = 1.1;
+        crossGroup.add(horizontal);
+        
+        crossGroup.position.set(pos[0], 0, pos[1]);
+        crossGroup.rotation.y = (Math.random() - 0.5) * 0.4;
+        scene.add(crossGroup);
+      });
+    }
+    
+    function createMausoleums() {
+      const mausoleumPositions = [
+        [-16, -12], [14, -14], [-18, -26], [17, -24]
+      ];
+      
+      mausoleumPositions.forEach(pos => {
+        const mausoleumGroup = new THREE.Group();
+        
+        const baseGeometry = new THREE.BoxGeometry(3, 2.5, 2.5);
+        const baseMaterial = new THREE.MeshStandardMaterial({ color: 0x9a9a9a });
+        const base = new THREE.Mesh(baseGeometry, baseMaterial);
+        base.position.y = 1.25;
+        mausoleumGroup.add(base);
+        
+        const roofGeometry = new THREE.ConeGeometry(2, 1, 4);
+        const roofMaterial = new THREE.MeshStandardMaterial({ color: 0x707070 });
+        const roof = new THREE.Mesh(roofGeometry, roofMaterial);
+        roof.position.y = 3;
+        roof.rotation.y = Math.PI / 4;
+        mausoleumGroup.add(roof);
+        
+        const doorGeometry = new THREE.BoxGeometry(0.8, 1.5, 0.1);
+        const doorMaterial = new THREE.MeshStandardMaterial({ color: 0x1a1a1a });
+        const door = new THREE.Mesh(doorGeometry, doorMaterial);
+        door.position.set(0, 0.75, 1.26);
+        mausoleumGroup.add(door);
+        
+        mausoleumGroup.position.set(pos[0], 0, pos[1]);
+        scene.add(mausoleumGroup);
+        
+        const light = new THREE.PointLight(0x663300, 0.3, 5);
+        light.position.set(0, 1, 1.5);
+        mausoleumGroup.add(light);
+      });
+    }
+    
+    function createGhosts() {
+      const ghostPositions = [
+        [-7, 2, -12], [9, 2.5, -15], [-4, 1.8, -18], [11, 2.2, -10],
+        [-15, 2.3, -25], [18, 2.1, -28], [-12, 2.5, -32], [20, 2.4, -22],
+        [-8, 2.2, -30], [14, 2.6, -35], [-19, 2.1, -38], [16, 2.3, -40]
+      ];
+      
+      ghostPositions.forEach((pos, i) => {
+        const ghostGroup = new THREE.Group();
+        
+        const bodyGeometry = new THREE.SphereGeometry(0.6, 16, 16);
+        bodyGeometry.scale(1, 1.5, 1);
+        const bodyMaterial = new THREE.MeshBasicMaterial({ 
+          color: 0xeeeeee,
+          transparent: true,
+          opacity: 0.7
+        });
+        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+        body.position.y = 0.3;
+        ghostGroup.add(body);
+        
+        const tailGeometry = new THREE.ConeGeometry(0.5, 1, 8);
+        const tailMaterial = new THREE.MeshBasicMaterial({ 
+          color: 0xeeeeee,
+          transparent: true,
+          opacity: 0.6
+        });
+        const tail = new THREE.Mesh(tailGeometry, tailMaterial);
+        tail.position.y = -0.5;
+        tail.rotation.x = Math.PI;
+        ghostGroup.add(tail);
+        
+        const eyeGeometry = new THREE.SphereGeometry(0.1, 8, 8);
+        const eyeMaterial = new THREE.MeshBasicMaterial({ color: 0x000000 });
+        
+        const leftEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
+        leftEye.position.set(-0.2, 0.5, 0.5);
+        ghostGroup.add(leftEye);
+        
+        const rightEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
+        rightEye.position.set(0.2, 0.5, 0.5);
+        ghostGroup.add(rightEye);
+        
+        const mouthGeometry = new THREE.SphereGeometry(0.15, 8, 8);
+        const mouth = new THREE.Mesh(mouthGeometry, eyeMaterial);
+        mouth.scale.set(1, 0.5, 1);
+        mouth.position.set(0, 0.2, 0.5);
+        ghostGroup.add(mouth);
+        
+        ghostGroup.position.set(pos[0], pos[1], pos[2]);
+        
+        ghostGroup.userData = { 
+          type: 'ghost',
+          startY: pos[1], 
+          startX: pos[0],
+          startZ: pos[2],
+          offset: i * 1500
+        };
+        scene.add(ghostGroup);
+        
+        const light = new THREE.PointLight(0xaaaaff, 0.4, 4);
+        ghostGroup.add(light);
+      });
+    }
+    
+    function createPumpkins() {
+      const pumpkinPositions = [
+        [-2, 0.3, -4], [3, 0.3, -7], [-9, 0.3, -13], [8, 0.3, -15],
+        [-11, 0.3, -19], [10, 0.3, -21], [-13, 0.3, -28], [11, 0.3, -29],
+        [-6, 0.3, -33], [7, 0.3, -36]
+      ];
+      
+      pumpkinPositions.forEach(pos => {
+        const pumpkinGroup = new THREE.Group();
+        
+        const bodyGeometry = new THREE.SphereGeometry(0.4, 16, 16);
+        bodyGeometry.scale(1, 0.8, 1);
+        const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0xff6600 });
+        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+        pumpkinGroup.add(body);
+        
+        const stemGeometry = new THREE.CylinderGeometry(0.05, 0.08, 0.2, 8);
+        const stemMaterial = new THREE.MeshStandardMaterial({ color: 0x2d5016 });
+        const stem = new THREE.Mesh(stemGeometry, stemMaterial);
+        stem.position.y = 0.4;
+        pumpkinGroup.add(stem);
+        
+        const eyeGeometry = new THREE.ConeGeometry(0.08, 0.12, 3);
+        const eyeMaterial = new THREE.MeshBasicMaterial({ color: 0xffaa00 });
+        
+        const leftEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
+        leftEye.position.set(-0.15, 0.1, 0.35);
+        leftEye.rotation.z = Math.PI;
+        pumpkinGroup.add(leftEye);
+        
+        const rightEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
+        rightEye.position.set(0.15, 0.1, 0.35);
+        rightEye.rotation.z = Math.PI;
+        pumpkinGroup.add(rightEye);
+        
+        pumpkinGroup.position.set(pos[0], pos[1], pos[2]);
+        
+        pumpkinGroup.userData = {
+          type: 'pumpkin'
+        };
+        
+        scene.add(pumpkinGroup);
+        
+        const light = new THREE.PointLight(0xff6600, 0.5, 3);
+        light.position.set(0, 0.2, 0);
+        pumpkinGroup.add(light);
+      });
+    }
+    
+    function createBats() {
+      const batPositions = [
+        [4, 5, -8], [-6, 6, -13], [8, 4.5, -16], [-9, 5.5, -11], [2, 6.5, -14],
+        [-12, 5.8, -20], [14, 6.2, -24], [-16, 5.5, -28], [18, 6, -32],
+        [-11, 5.2, -35], [15, 6.5, -38], [-17, 5.8, -42], [20, 5.3, -45],
+        [10, 6.8, -26], [-13, 5.6, -30]
+      ];
+      
+      batPositions.forEach((pos, i) => {
+        const batGroup = new THREE.Group();
+        
+        const bodyGeometry = new THREE.SphereGeometry(0.1, 8, 8);
+        bodyGeometry.scale(1.5, 1, 1);
+        const bodyMaterial = new THREE.MeshBasicMaterial({ color: 0x1a1a1a });
+        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+        batGroup.add(body);
+        
+        const wingGeometry = new THREE.ConeGeometry(0.3, 0.15, 3);
+        const wingMaterial = new THREE.MeshBasicMaterial({ color: 0x1a1a1a });
+        
+        const leftWing = new THREE.Mesh(wingGeometry, wingMaterial);
+        leftWing.position.set(-0.2, 0, 0);
+        leftWing.rotation.z = Math.PI / 2;
+        batGroup.add(leftWing);
+        
+        const rightWing = new THREE.Mesh(wingGeometry, wingMaterial);
+        rightWing.position.set(0.2, 0, 0);
+        rightWing.rotation.z = -Math.PI / 2;
+        batGroup.add(rightWing);
+        
+        batGroup.position.set(pos[0], pos[1], pos[2]);
+        batGroup.userData = { 
+          type: 'bat',
+          startY: pos[1],
+          startX: pos[0],
+          startZ: pos[2],
+          offset: i * 2000,
+          wingLeft: leftWing,
+          wingRight: rightWing
+        };
+        scene.add(batGroup);
+      });
+    }
+    
+    function onKeyDown(event) {
+      switch(event.code) {
+        case 'KeyW': moveForward = true; break;
+        case 'KeyS': moveBackward = true; break;
+        case 'KeyA': moveLeft = true; break;
+        case 'KeyD': moveRight = true; break;
+        case 'ArrowLeft': turnLeft = true; break;
+        case 'ArrowRight': turnRight = true; break;
+        case 'KeyF':
+          flashlightOn = !flashlightOn;
+          flashlight.intensity = flashlightOn ? 2 : 0;
+          updateGameStats();
+          break;
+      }
+    }
+    
+    function onKeyUp(event) {
+      switch(event.code) {
+        case 'KeyW': moveForward = false; break;
+        case 'KeyS': moveBackward = false; break;
+        case 'KeyA': moveLeft = false; break;
+        case 'KeyD': moveRight = false; break;
+        case 'ArrowLeft': turnLeft = false; break;
+        case 'ArrowRight': turnRight = false; break;
+      }
+    }
+    
+    function onMouseMove(event) {
+      if (document.pointerLockElement === document.body) {
+        yaw -= event.movementX * 0.002;
+        pitch -= event.movementY * 0.002;
+        pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
+      }
+    }
+    
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+    
+    function checkCollectibles() {
+      collectibles.forEach(collectible => {
+        if (!collectible.userData.collected) {
+          const distance = camera.position.distanceTo(collectible.position);
+          if (distance < 1.5) {
+            collectible.userData.collected = true;
+            collectible.visible = false;
+            skullsCollected++;
+            updateGameStats();
+            
+            if (skullsCollected === totalSkulls) {
+              setTimeout(() => {
+                alert('🎉 You collected all the skulls! You win! 👻💀\n\nResetting game...');
+                resetGame();
+              }, 100);
+            }
+          }
+        }
+      });
+    }
+    
+    function resetGame() {
+      // Reset skull collection
+      skullsCollected = 0;
+      collectibles.forEach(collectible => {
+        collectible.userData.collected = false;
+        collectible.visible = true;
+      });
+      
+      // Reset jump scare ghosts
+      jumpScareGhosts.forEach(ghost => {
+        ghost.userData.triggered = false;
+        ghost.children.forEach(mesh => {
+          if (mesh.material && mesh.material.transparent) {
+            mesh.material.opacity = 0;
+          }
+        });
+      });
+      
+      // Reset player position
+      camera.position.set(0, 1.6, 0);
+      yaw = 0;
+      pitch = 0;
+      
+      // Reset speed
+      isChased = false;
+      currentSpeed = baseSpeed;
+      
+      // Turn off flashlight
+      flashlightOn = false;
+      flashlight.intensity = 0;
+      
+      // Reset last jump scare timer
+      lastJumpScare = 0;
+      
+      updateGameStats();
+    }
+    
+    function checkSafeZones() {
+      inSafeZone = false;
+      safeZones.forEach(zone => {
+        const distance = camera.position.distanceTo(zone.position);
+        if (distance < zone.userData.radius) {
+          inSafeZone = true;
+        }
+      });
+      updateGameStats();
+    }
+    
+    function checkJumpScares() {
+      if (inSafeZone) return;
+      
+      jumpScareGhosts.forEach(ghost => {
+        if (!ghost.userData.triggered) {
+          const distance = camera.position.distanceTo(ghost.position);
+          if (distance < ghost.userData.triggerDistance) {
+            ghost.userData.triggered = true;
+            
+            ghost.children.forEach(mesh => {
+              if (mesh.material && mesh.material.transparent) {
+                mesh.material.opacity = 0.9;
+              }
+            });
+            
+            triggerJumpScare();
+            
+            setTimeout(() => {
+              ghost.children.forEach(mesh => {
+                if (mesh.material && mesh.material.transparent) {
+                  mesh.material.opacity = 0;
+                }
+              });
+              ghost.userData.triggered = false;
+            }, 10000);
+          }
+        }
+      });
+    }
+    
+    function animate() {
+      requestAnimationFrame(animate);
+      
+      const time = Date.now() * 0.001;
+      
+      // Update flashlight
+      flashlight.position.copy(camera.position);
+      const forward = new THREE.Vector3(0, 0, -1);
+      forward.applyQuaternion(camera.quaternion);
+      flashlight.target.position.copy(camera.position).add(forward);
+      
+      // Update ghosts
+      scene.children.forEach(child => {
+        if (child.userData && child.userData.type === 'ghost') {
+          const offset = child.userData.offset / 1000;
+          child.position.y = child.userData.startY + Math.sin(time + offset) * 0.4;
+          child.position.x = child.userData.startX + Math.sin(time * 0.3 + offset) * 0.3;
+          
+          const dx = camera.position.x - child.position.x;
+          const dz = camera.position.z - child.position.z;
+          child.rotation.y = Math.atan2(dx, dz);
+          
+          child.children.forEach(mesh => {
+            if (mesh.material && mesh.material.transparent) {
+              mesh.material.opacity = 0.5 + Math.sin(time * 2 + offset) * 0.2;
+            }
+          });
+        }
+        
+        if (child.userData && child.userData.type === 'pumpkin') {
+          const dx = camera.position.x - child.position.x;
+          const dz = camera.position.z - child.position.z;
+          child.rotation.y = Math.atan2(dx, dz);
+        }
+        
+        if (child.userData && child.userData.type === 'bat') {
+          const offset = child.userData.offset / 1000;
+          child.position.y = child.userData.startY + Math.sin(time * 2 + offset) * 0.3;
+          child.position.x = child.userData.startX + Math.cos(time * 0.5 + offset) * 1.5;
+          child.position.z = child.userData.startZ + Math.sin(time * 0.5 + offset) * 1.5;
+          
+          if (child.userData.wingLeft && child.userData.wingRight) {
+            const flap = Math.sin(time * 10 + offset) * 0.3;
+            child.userData.wingLeft.rotation.y = flap;
+            child.userData.wingRight.rotation.y = -flap;
+          }
+        }
+        
+        if (child.userData && child.userData.type === 'collectible' && !child.userData.collected) {
+          child.rotation.y = time;
+          child.position.y = 0.5 + Math.sin(time * 2) * 0.2;
+        }
+      });
+      
+      if (turnLeft) yaw += 0.02;
+      if (turnRight) yaw -= 0.02;
+      
+      camera.rotation.order = 'YXZ';
+      camera.rotation.y = yaw;
+      camera.rotation.x = pitch;
+      
+      direction.z = Number(moveForward) - Number(moveBackward);
+      direction.x = Number(moveRight) - Number(moveLeft);
+      direction.normalize();
+      
+      if (moveForward || moveBackward) {
+        velocity.z = direction.z * currentSpeed;
+      } else {
+        velocity.z = 0;
+      }
+      
+      if (moveLeft || moveRight) {
+        velocity.x = direction.x * currentSpeed;
+      } else {
+        velocity.x = 0;
+      }
+      
+      const forwardVec = new THREE.Vector3(0, 0, -1);
+      forwardVec.applyQuaternion(camera.quaternion);
+      forwardVec.y = 0;
+      forwardVec.normalize();
+      
+      const right = new THREE.Vector3(1, 0, 0);
+      right.applyQuaternion(camera.quaternion);
+      right.y = 0;
+      right.normalize();
+      
+      camera.position.addScaledVector(forwardVec, velocity.z);
+      camera.position.addScaledVector(right, velocity.x);
+      
+      checkCollectibles();
+      checkSafeZones();
+      checkJumpScares();
+      
+      renderer.render(scene, camera);
+    }
+    
+    init();
+    animate();
+  </script>
+</body>
+</html>
